@@ -41,3 +41,82 @@ Client API is a lower level API that is closer to the AWS service APIs. There fu
 
 ### Bringing it all together:
 This architecture would be used when the raw data source is in .csv format and the target destination is a snowflake table with processing done to convert the .csv file to .parquet format before using Snowpipe to convert the parquet file to a snowflake table. Because the pipeline is automated, this means that it can process large amounts of .csv files as raw data to snowflake tables in bulk, removing the need for manual uploads, transfers, and copies.
+
+
+#### Boto3 Code:
+```
+s3_client.upload_file(Filename='test.csv',
+                      Bucket='techcatalyst-raw',
+                      Key=key)
+```
+Uploads raw data files from local machine to S3 Landing Bucket
+
+#### Lambda AWS Wrangler Code:
+```
+import boto3
+import awswrangler as wr
+from urllib.parse import unquote_plus
+import json
+
+def lambda_handler(event, context):
+    # Get the source bucket and object name from the Lambda event
+    for record in event['Records']:
+        source_bucket = record['s3']['bucket']['name']
+        source_key = unquote_plus(record['s3']['object']['key'])
+    
+    print(f'Bucket: {source_bucket}')
+    print(f'Key: {source_key}')
+    
+    input_path = f"s3://{source_bucket}/{source_key}"
+    print(f'Input Path: {input_path}')
+    
+    # Define the destination bucket and key
+    destination_bucket = "techcatalyst-public"  # Target bucket name as a string
+    
+    # Derive the output key (keep same folder structure, replace file extension with .parquet)
+    if source_key.lower().endswith('.csv'):
+        output_key = source_key[:-4] + ".parquet"
+    else:
+        output_key = source_key + ".parquet"
+        
+    output_path = f"s3://{destination_bucket}/{output_key}"
+    print(f'Output Path: {output_path}')
+    
+    # Read the CSV file from S3
+    try:
+        input_df = wr.s3.read_csv([input_path])
+    except Exception as e:
+        print("error on read")
+        print(e)
+        return {
+            'statusCode': 500,
+            'body': json.dumps('Error reading source CSV file')
+        }
+    
+    # Write the DataFrame to Parquet format in the destination S3 bucket
+    result = wr.s3.to_parquet(
+        df=input_df,
+        path=output_path,
+    )
+    
+    print("RESULT: ")
+    print(result)
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps('CSV file converted to Parquet and moved successfully!')
+    }
+```
+Checks for newly uploaded files in the S3 Landing Bucket. When a file is uploaded it converts them to .parquet and saves it to a staging bucket in .parquet format
+
+#### Snowflake Snowpipe code:
+```
+create or replace pipe techcatalyst.external_stage.BEN_PIPE
+auto_ingest = True
+as
+copy into techcatalyst.BEN.temp
+from  @TECHCATALYST.EXTERNAL_STAGE.BEN_AWS_STAGE
+FILE_FORMAT = (format_name = 'BEN.parquet_format')
+match_by_column_name = case_insensitive;
+```
+Checks for newly uploaded files in the S3 Staging Bucket. When a .parquet file is uploaded to the /BEN/ folder in the staging bucket, it copies the data into a transient table ```techcatalyst.ben.temp```
